@@ -3,3 +3,4 @@ incidents/
 *.db
 __pycache__/
 *.pt
+recordings/
