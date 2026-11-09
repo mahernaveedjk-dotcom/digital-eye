@@ -1,0 +1,7 @@
+streamlit>=1.37.0
+opencv-python
+numpy
+ultralytics
+streamlit-image-coordinates
+imageio-ffmpeg
+huggingface-hub

@@ -1,0 +1,13 @@
+venv/
+__pycache__/
+*.pyc
+config.py
+.env
+*.db
+*.sqlite
+*.sqlite3
+recordings/
+incidents/
+*.pt
+*.onnx
+*.log
