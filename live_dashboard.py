@@ -114,6 +114,35 @@ def live_fragment(
     state.setdefault("live_last_metrics", None)
     state.setdefault("live_last_new", time.time())
     state.setdefault("live_last_history", 0.0)
+    state.setdefault("live_camera_fps", 0.0)
+    state.setdefault("live_status", "Starting")
+    state.setdefault("live_zones_text", "-")
+    state.setdefault("live_alert_count", alerts_today())
+    state.setdefault("live_weapon_alert_count", alerts_today("weapon"))
+
+    # Touch every container created outside this fragment on each full app run.
+    # Streamlit needs these containers to be written during the initial full run.
+    st.session_state["people_metric"].metric(
+        "People now", len(state["live_person_boxes"])
+    )
+    st.session_state["status_metric"].metric(
+        "Status", state["live_status"]
+    )
+    st.session_state["zones_metric"].metric(
+        "Zones occupied", state["live_zones_text"]
+    )
+    st.session_state["alerts_metric"].metric(
+        "Alerts today", state["live_alert_count"]
+    )
+    st.session_state["weapon_metric"].metric(
+        "Weapon alerts today", state["live_weapon_alert_count"]
+    )
+    st.session_state["camera_metric"].metric(
+        "Camera",
+        "LIVE" if reader.status == "live" else reader.status.title(),
+        f"{state['live_camera_fps']:.0f} FPS",
+        delta_color="off"
+    )
 
     zones = [
         zone for zone in load_zones()
@@ -146,16 +175,29 @@ def live_fragment(
 
     now_seconds = time.time()
 
+    # Keep fragment-owned updates inside this fragment.
+    if now_seconds - state["live_last_history"] >= 2.0:
+        render_history(st.session_state["history_placeholder"])
+        state["live_last_history"] = now_seconds
+
     # Camera status
     if frame is None:
         if reader.status in ("connecting", "reconnecting"):
-            if reader.status == "connecting":
-                st.info("Starting the camera...")
-            else:
-                st.warning(
-                    "Camera disconnected. Reconnecting automatically..."
-                )
+            st.session_state["video_placeholder"].info(
+                "Starting the camera..." if reader.status == "connecting"
+                else "Camera disconnected. Reconnecting automatically..."
+            )
+        else:
+            st.session_state["video_placeholder"].warning(
+                "No camera frame is available."
+            )
 
+        if reader.recording:
+            st.session_state["recording_placeholder"].error(
+                f"● Recording {fmt_time(reader.rec_elapsed())}"
+            )
+        else:
+            st.session_state["recording_placeholder"].empty()
         return
 
     state["live_last_id"] = frame_id
@@ -548,6 +590,8 @@ def live_fragment(
         status,
         f"{occupied_count} / {len(zones)}"
     )
+    state["live_status"] = status
+    state["live_zones_text"] = metrics[2]
 
     if metrics != state["live_last_metrics"]:
         st.session_state["people_metric"].metric(
@@ -567,50 +611,41 @@ def live_fragment(
 
         state["live_last_metrics"] = metrics
 
-    # Display video
-    if (
-        now_seconds - state["live_last_display"]
-        >= 1.0 / DISPLAY_FPS
-    ):
-        state["live_last_display"] = now_seconds
+    # The fragment runs every 0.1 seconds; display its newest frame.
+    # This also ensures the external video placeholder is written on every full run.
+    state["live_last_display"] = now_seconds
+    st.session_state["video_placeholder"].image(
+        frame,
+        channels="BGR",
+        output_format="JPEG",
+        width=720
+    )
 
-        st.session_state["video_placeholder"].image(
-            frame,
-            channels="BGR",
-            output_format="JPEG",
-            width=720
-        )
-
-    # Camera speed
+    # Camera speed (this measures frames processed by the dashboard, not raw camera FPS).
     if now_seconds - state["live_fps_start"] >= 1.0:
-        fps = (
-            state["live_fps_count"]
-            / (now_seconds - state["live_fps_start"])
-        )
-
+        elapsed = max(now_seconds - state["live_fps_start"], 0.001)
+        state["live_camera_fps"] = state["live_fps_count"] / elapsed
         state["live_fps_count"] = 0
         state["live_fps_start"] = now_seconds
 
-        st.session_state["camera_metric"].metric(
-            "Camera",
-            "LIVE",
-            f"{fps:.0f} FPS",
-            delta_color="off"
+    st.session_state["camera_metric"].metric(
+        "Camera",
+        "LIVE",
+        f"{state['live_camera_fps']:.0f} FPS",
+        delta_color="off"
+    )
+
+    finished = reader.pop_finished_clips()
+    if finished:
+        render_history(st.session_state["history_placeholder"])
+        state["live_last_history"] = now_seconds
+
+    if reader.recording:
+        st.session_state["recording_placeholder"].error(
+            f"● Recording {fmt_time(reader.rec_elapsed())}"
         )
-
-        finished = reader.pop_finished_clips()
-
-        if finished:
-            render_history(
-                st.session_state["history_placeholder"]
-            )
-
-        if reader.recording:
-            st.session_state["recording_placeholder"].error(
-                f"● Recording {fmt_time(reader.rec_elapsed())}"
-            )
-        else:
-            st.session_state["recording_placeholder"].empty()
+    else:
+        st.session_state["recording_placeholder"].empty()
 
     # Zone alerts
     for zone, *_ in zone_pixels:
@@ -692,9 +727,10 @@ def live_fragment(
                     daemon=True
                 ).start()
 
+            state["live_alert_count"] = alerts_today()
             st.session_state["alerts_metric"].metric(
                 "Alerts today",
-                alerts_today()
+                state["live_alert_count"]
             )
 
             render_history(
@@ -836,14 +872,16 @@ def live_fragment(
                 daemon=True
             ).start()
 
+            state["live_alert_count"] = alerts_today()
             st.session_state["alerts_metric"].metric(
                 "Alerts today",
-                alerts_today()
+                state["live_alert_count"]
             )
 
+            state["live_weapon_alert_count"] = alerts_today("weapon")
             st.session_state["weapon_metric"].metric(
                 "Weapon alerts today",
-                alerts_today("weapon")
+                state["live_weapon_alert_count"]
             )
 
             render_history(
