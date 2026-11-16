@@ -14,8 +14,6 @@ from settings import (
     GRACE,
     USE_FEET,
     PERSON_EVERY,
-    DISPLAY_FPS,
-    DETECTION_SIZES,
     RESTRICTED_COLOR,
     WARNING_COLOR,
     FONT,
@@ -28,9 +26,10 @@ from helpers import fmt_time, put_label
 from database import add_incident, alerts_today, recent_incidents
 from zones import load_zones, zone_color, draw_zone_box
 from email_alerts import send_email
-from detection import detect_people, detect_weapons
+from detection import detect_people
 
 
+# Show previously saved alerts in the dashboard.
 def render_history(history_placeholder):
     rows = recent_incidents()
 
@@ -50,19 +49,22 @@ def render_history(history_placeholder):
             clip_path
         ) in enumerate(rows):
 
-            if alert_type == "weapon":
-                caption = f"{timestamp} | WEAPON: {details}"
-
-            elif alert_type == "warning":
+            if alert_type == "warning":
                 caption = (
                     f"{timestamp} | WARNING - "
                     f"{details} | {seconds}s"
                 )
 
-            else:
+            elif alert_type == "zone":
                 caption = (
                     f"{timestamp} | "
                     f"{details or 'Zone'} | {seconds}s in zone"
+                )
+
+            else:
+                caption = (
+                    f"{timestamp} | Previous incident: "
+                    f"{details or 'Saved incident'}"
                 )
 
             with columns[index % 3]:
@@ -83,60 +85,59 @@ def render_history(history_placeholder):
                         st.caption("Video clip is being saved...")
 
 
+# Calculate how long a person has occupied a particular zone.
+def get_zone_dwell(zone_state, zone_id, now_seconds):
+    start = zone_state[zone_id]["start"]
+
+    if start is None:
+        return 0
+
+    return now_seconds - start
+
+
+# --------------------------------------------------
+# LIVE CAMERA FRAGMENT
+# --------------------------------------------------
 @st.fragment(run_every=0.1)
 def live_fragment(
     reader,
     model,
-    weapon_model,
-    weapon_ids,
-    weapon_on,
-    weapon_conf,
-    weapon_every,
-    weapon_confirm,
-    weapon_cooldown,
     repeat_seconds,
     detection_size,
     show_outlines
 ):
-    """Process and display one camera frame per fragment refresh."""
-
     state = st.session_state
 
+    # Store values between fragment refreshes.
     state.setdefault("live_last_id", -1)
     state.setdefault("live_frame_no", 0)
     state.setdefault("live_person_boxes", [])
-    state.setdefault("live_weapons", [])
-    state.setdefault("live_weapon_hits", 0)
-    state.setdefault("live_weapon_last_seen", 0.0)
-    state.setdefault("live_last_display", 0.0)
     state.setdefault("live_fps_count", 0)
     state.setdefault("live_fps_start", time.time())
     state.setdefault("live_last_metrics", None)
-    state.setdefault("live_last_new", time.time())
-    state.setdefault("live_last_history", 0.0)
     state.setdefault("live_camera_fps", 0.0)
     state.setdefault("live_status", "Starting")
     state.setdefault("live_zones_text", "-")
     state.setdefault("live_alert_count", alerts_today())
-    state.setdefault("live_weapon_alert_count", alerts_today("weapon"))
+    state.setdefault("live_last_history", 0.0)
 
-    # Touch every container created outside this fragment on each full app run.
-    # Streamlit needs these containers to be written during the initial full run.
+    # Update dashboard metrics.
     st.session_state["people_metric"].metric(
         "People now", len(state["live_person_boxes"])
     )
+
     st.session_state["status_metric"].metric(
         "Status", state["live_status"]
     )
+
     st.session_state["zones_metric"].metric(
         "Zones occupied", state["live_zones_text"]
     )
+
     st.session_state["alerts_metric"].metric(
         "Alerts today", state["live_alert_count"]
     )
-    st.session_state["weapon_metric"].metric(
-        "Weapon alerts today", state["live_weapon_alert_count"]
-    )
+
     st.session_state["camera_metric"].metric(
         "Camera",
         "LIVE" if reader.status == "live" else reader.status.title(),
@@ -144,6 +145,7 @@ def live_fragment(
         delta_color="off"
     )
 
+    # Load enabled zones only.
     zones = [
         zone for zone in load_zones()
         if zone.get("enabled", True)
@@ -151,8 +153,10 @@ def live_fragment(
 
     zone_ids = tuple(zone["id"] for zone in zones)
 
+    # Reset timers if the enabled zones change.
     if state.get("live_zone_ids") != zone_ids:
         state["live_zone_ids"] = zone_ids
+
         state["live_zone_state"] = {
             zone_id: {
                 "start": None,
@@ -169,22 +173,21 @@ def live_fragment(
             "to draw a restricted or warning area."
         )
 
-    frame_id, frame = reader.get_frame(
-        state["live_last_id"]
-    )
-
+    # Get the newest camera frame.
+    frame_id, frame = reader.get_frame(state["live_last_id"])
     now_seconds = time.time()
 
-    # Keep fragment-owned updates inside this fragment.
+    # Refresh incident history every two seconds.
     if now_seconds - state["live_last_history"] >= 2.0:
         render_history(st.session_state["history_placeholder"])
         state["live_last_history"] = now_seconds
 
-    # Camera status
+    # Handle camera connection problems.
     if frame is None:
         if reader.status in ("connecting", "reconnecting"):
             st.session_state["video_placeholder"].info(
-                "Starting the camera..." if reader.status == "connecting"
+                "Starting the camera..."
+                if reader.status == "connecting"
                 else "Camera disconnected. Reconnecting automatically..."
             )
         else:
@@ -198,17 +201,17 @@ def live_fragment(
             )
         else:
             st.session_state["recording_placeholder"].empty()
+
         return
 
     state["live_last_id"] = frame_id
-    state["live_last_new"] = now_seconds
     state["live_frame_no"] += 1
     state["live_fps_count"] += 1
 
     frame_no = state["live_frame_no"]
-
     height, width = frame.shape[:2]
 
+    # Convert zone percentage coordinates into camera pixel coordinates.
     zone_pixels = [
         (
             zone,
@@ -220,16 +223,15 @@ def live_fragment(
         for zone in zones
     ]
 
+    # Track whether each zone currently contains a person.
     occupied = {
         zone["id"]: False
         for zone in zones
     }
 
-    # Person detection
-    if (
-        frame_no == 1
-        or frame_no % PERSON_EVERY == 0
-    ):
+    # Run person detection on the first frame and then every
+    # PERSON_EVERY frames.
+    if frame_no == 1 or frame_no % PERSON_EVERY == 0:
         state["live_person_boxes"] = detect_people(
             model,
             frame,
@@ -237,33 +239,18 @@ def live_fragment(
         )
 
     person_boxes = state["live_person_boxes"]
-
     detections = []
 
+    # Check each person's centre or feet against all enabled zones.
     for x1, y1, x2, y2 in person_boxes:
         px = (x1 + x2) // 2
-
-        py = (
-            y2
-            if USE_FEET
-            else (y1 + y2) // 2
-        )
+        py = y2 if USE_FEET else (y1 + y2) // 2
 
         in_red = False
         in_warning = False
 
-        for (
-            zone,
-            zx1,
-            zy1,
-            zx2,
-            zy2
-        ) in zone_pixels:
-
-            if (
-                zx1 <= px <= zx2
-                and zy1 <= py <= zy2
-            ):
+        for zone, zx1, zy1, zx2, zy2 in zone_pixels:
+            if zx1 <= px <= zx2 and zy1 <= py <= zy2:
                 occupied[zone["id"]] = True
 
                 if zone["type"] == "Restricted":
@@ -280,6 +267,7 @@ def live_fragment(
 
     people = len(person_boxes)
 
+    # Check whether any Restricted or Warning Zone is occupied.
     any_red = any(
         occupied[zone["id"]]
         for zone in zones
@@ -292,51 +280,7 @@ def live_fragment(
         if zone["type"] != "Restricted"
     )
 
-    # Weapon detection
-    if (
-        weapon_on
-        and weapon_model is not None
-        and (frame_no + 1) % weapon_every == 0
-    ):
-        state["live_weapons"] = detect_weapons(
-            weapon_model,
-            frame,
-            weapon_ids,
-            weapon_conf,
-            person_boxes,
-            zones
-        )
-
-        if state["live_weapons"]:
-            state["live_weapon_hits"] += 1
-        else:
-            state["live_weapon_hits"] = 0
-
-    weapons = state["live_weapons"]
-    weapon_seen = bool(weapons)
-
-    if weapon_seen:
-        state["live_weapon_last_seen"] = now_seconds
-
-    elif (
-        state["live_weapon_last_seen"]
-        and now_seconds - state["live_weapon_last_seen"] > 5
-    ):
-        state["last_weapon_alert_RED"] = 0.0
-        state["last_weapon_alert_GREEN"] = 0.0
-        state["live_weapon_last_seen"] = 0.0
-
-    weapon_red = any(
-        weapon[6] == "RED"
-        for weapon in weapons
-    )
-
-    weapon_green = any(
-        weapon[6] == "GREEN"
-        for weapon in weapons
-    )
-
-    # Zone dwell timers
+    # Update the dwell timer for every zone.
     for zone, *_ in zone_pixels:
         zone_id = zone["id"]
         zone_info = zone_state[zone_id]
@@ -352,18 +296,9 @@ def live_fragment(
             and now_seconds - zone_info["last_inside"] > GRACE
         ):
             zone_info["start"] = None
-
             state[f"last_alert_zone_{zone_id}"] = 0.0
 
-    def dwell_of(zone_id):
-        start = zone_state[zone_id]["start"]
-
-        if start is None:
-            return 0
-
-        return now_seconds - start
-
-    # Tint only occupied zones
+    # Tint zones that currently contain a person.
     overlay = frame.copy()
     tinted = False
 
@@ -376,39 +311,24 @@ def live_fragment(
                 zone_color(zone),
                 -1
             )
-
             tinted = True
 
     if tinted:
-        frame = cv2.addWeighted(
-            overlay,
-            0.3,
-            frame,
-            0.7,
-            0
-        )
+        frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
 
-    # Draw zones
+    # Draw zone borders and labels.
     for zone in zones:
         if occupied[zone["id"]]:
             draw_zone_box(
-                frame,
-                zone,
-                width,
-                height,
-                active=True
+                frame, zone, width, height, active=True
             )
 
         elif show_outlines:
             draw_zone_box(
-                frame,
-                zone,
-                width,
-                height,
-                active=False
+                frame, zone, width, height, active=False
             )
 
-    # Draw people
+    # Draw person bounding boxes.
     for (
         x1, y1, x2, y2,
         px, py,
@@ -428,21 +348,8 @@ def live_fragment(
             color = (0, 255, 0)
             label = "Person"
 
-        cv2.rectangle(
-            frame,
-            (x1, y1),
-            (x2, y2),
-            color,
-            2
-        )
-
-        cv2.circle(
-            frame,
-            (px, py),
-            6,
-            color,
-            -1
-        )
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+        cv2.circle(frame, (px, py), 6, color, -1)
 
         cv2.putText(
             frame,
@@ -454,82 +361,9 @@ def live_fragment(
             2
         )
 
-    # Draw weapons
-    for (
-        x1, y1, x2, y2,
-        name, confidence,
-        location, held, zone_name
-    ) in weapons:
-
-        color = (
-            (0, 0, 255)
-            if location == "RED"
-            else (0, 128, 255)
-        )
-
-        cv2.rectangle(
-            frame,
-            (x1, y1),
-            (x2, y2),
-            color,
-            3
-        )
-
-        cv2.putText(
-            frame,
-            f"WEAPON {name} {int(confidence * 100)}% ({zone_name})",
-            (x1, max(y1 - 10, 60)),
-            FONT,
-            0.55,
-            color,
-            2
-        )
-
-    # Weapon warning banner
-    if weapon_seen:
-        best = max(
-            weapons,
-            key=lambda item: item[5]
-        )
-
-        if weapon_red and weapon_green:
-            banner = "CRITICAL: WEAPONS IN RED + GREEN ZONES"
-            banner_color = (0, 0, 255)
-
-        elif weapon_red:
-            banner = (
-                f"CRITICAL: WEAPON IN RED ZONE - "
-                f"{best[4]} {int(best[5] * 100)}%"
-            )
-            banner_color = (0, 0, 255)
-
-        else:
-            banner = (
-                f"WARNING: WEAPON IN GREEN ZONE - "
-                f"{best[4]} {int(best[5] * 100)}%"
-            )
-            banner_color = (0, 100, 230)
-
-        cv2.rectangle(
-            frame,
-            (0, 0),
-            (width, 45),
-            banner_color,
-            -1
-        )
-
-        cv2.putText(
-            frame,
-            banner,
-            (10, 32),
-            FONT,
-            0.8,
-            (255, 255, 255),
-            2
-        )
-
     now = datetime.now()
 
+    # Add timestamp to the live image.
     cv2.putText(
         frame,
         now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -540,23 +374,27 @@ def live_fragment(
         2
     )
 
-    # Zone countdowns
-    text_y = 75 if weapon_seen else 30
+    # Display dwell countdowns for occupied zones.
+    text_y = 30
 
     for zone, *_ in zone_pixels:
         if occupied[zone["id"]]:
+            dwell = get_zone_dwell(
+                zone_state,
+                zone["id"],
+                now_seconds
+            )
+
             put_label(
                 frame,
-                f"{zone['name']}: "
-                f"{int(dwell_of(zone['id']))}s / "
-                f"{zone['timer']}s",
+                f"{zone['name']}: {int(dwell)}s / {zone['timer']}s",
                 (10, text_y),
                 zone_color(zone)
             )
 
             text_y += 28
 
-    # Manual recording indicator
+    # Show recording indicator on the camera image.
     if reader.recording:
         cv2.circle(
             frame,
@@ -573,47 +411,40 @@ def live_fragment(
             scale=0.55
         )
 
-    # Dashboard metrics
-    if weapon_seen:
-        status = "WEAPON!"
-    elif any_red:
+    # Update dashboard status.
+    if any_red:
         status = "ALERT"
+
     elif any_warning:
         status = "WARNING"
+
     else:
         status = "SAFE"
 
     occupied_count = sum(occupied.values())
+    zones_text = f"{occupied_count} / {len(zones)}"
 
-    metrics = (
-        people,
-        status,
-        f"{occupied_count} / {len(zones)}"
-    )
+    metrics = (people, status, zones_text)
+
     state["live_status"] = status
-    state["live_zones_text"] = metrics[2]
+    state["live_zones_text"] = zones_text
 
     if metrics != state["live_last_metrics"]:
         st.session_state["people_metric"].metric(
-            "People now",
-            people
+            "People now", people
         )
 
         st.session_state["status_metric"].metric(
-            "Status",
-            status
+            "Status", status
         )
 
         st.session_state["zones_metric"].metric(
-            "Zones occupied",
-            metrics[2]
+            "Zones occupied", zones_text
         )
 
         state["live_last_metrics"] = metrics
 
-    # The fragment runs every 0.1 seconds; display its newest frame.
-    # This also ensures the external video placeholder is written on every full run.
-    state["live_last_display"] = now_seconds
+    # Display the newest annotated frame.
     st.session_state["video_placeholder"].image(
         frame,
         channels="BGR",
@@ -621,10 +452,18 @@ def live_fragment(
         width=720
     )
 
-    # Camera speed (this measures frames processed by the dashboard, not raw camera FPS).
+    # Calculate dashboard processing FPS.
+    # This is not the camera's hardware FPS.
     if now_seconds - state["live_fps_start"] >= 1.0:
-        elapsed = max(now_seconds - state["live_fps_start"], 0.001)
-        state["live_camera_fps"] = state["live_fps_count"] / elapsed
+        elapsed = max(
+            now_seconds - state["live_fps_start"],
+            0.001
+        )
+
+        state["live_camera_fps"] = (
+            state["live_fps_count"] / elapsed
+        )
+
         state["live_fps_count"] = 0
         state["live_fps_start"] = now_seconds
 
@@ -635,36 +474,42 @@ def live_fragment(
         delta_color="off"
     )
 
+    # Refresh history when a video clip finishes saving.
     finished = reader.pop_finished_clips()
+
     if finished:
         render_history(st.session_state["history_placeholder"])
         state["live_last_history"] = now_seconds
 
+    # Keep recording timer visible in the sidebar.
     if reader.recording:
         st.session_state["recording_placeholder"].error(
             f"● Recording {fmt_time(reader.rec_elapsed())}"
         )
+
     else:
         st.session_state["recording_placeholder"].empty()
 
-    # Zone alerts
+    # Create zone incidents after the configured dwell time is reached.
     for zone, *_ in zone_pixels:
         zone_id = zone["id"]
 
         if not occupied[zone_id]:
             continue
 
-        dwell = dwell_of(zone_id)
+        dwell = get_zone_dwell(
+            zone_state,
+            zone_id,
+            now_seconds
+        )
 
         alert_key = f"last_alert_zone_{zone_id}"
 
         if (
             dwell >= zone["timer"]
-            and now_seconds - state.get(alert_key, 0.0)
-            > repeat_seconds
+            and now_seconds - state.get(alert_key, 0.0) > repeat_seconds
         ):
             state[alert_key] = now_seconds
-
             restricted = zone["type"] == "Restricted"
 
             stamp = now.strftime("%Y%m%d_%H%M%S")
@@ -684,8 +529,7 @@ def live_fragment(
 
             put_label(
                 snapshot,
-                f"ZONE: {zone['name']} "
-                f"({zone['type']}) - {int(dwell)}s",
+                f"ZONE: {zone['name']} ({zone['type']}) - {int(dwell)}s",
                 (10, height - 45),
                 zone_color(zone)
             )
@@ -704,6 +548,8 @@ def live_fragment(
                 clip_path
             )
 
+            # Restricted-zone alerts always send email.
+            # Warning-zone emails depend on settings.py.
             if restricted or WARNING_SENDS_EMAIL:
                 body = (
                     "DIGITAL EYE ALERT\n\n"
@@ -727,7 +573,9 @@ def live_fragment(
                     daemon=True
                 ).start()
 
+            # Refresh alert count and incident history.
             state["live_alert_count"] = alerts_today()
+
             st.session_state["alerts_metric"].metric(
                 "Alerts today",
                 state["live_alert_count"]
@@ -737,182 +585,27 @@ def live_fragment(
                 st.session_state["history_placeholder"]
             )
 
-    # Weapon alerts
-    if (
-        weapon_seen
-        and state["live_weapon_hits"] >= weapon_confirm
-    ):
-        red_list = [
-            item for item in weapons
-            if item[6] == "RED"
-        ]
 
-        green_list = [
-            item for item in weapons
-            if item[6] == "GREEN"
-        ]
-
-        state.setdefault("last_weapon_alert_RED", 0.0)
-        state.setdefault("last_weapon_alert_GREEN", 0.0)
-
-        due_red = (
-            bool(red_list)
-            and now_seconds - state["last_weapon_alert_RED"]
-            > weapon_cooldown
-        )
-
-        due_green = (
-            bool(green_list)
-            and now_seconds - state["last_weapon_alert_GREEN"]
-            > weapon_cooldown
-        )
-
-        if due_red or due_green:
-            if red_list:
-                state["last_weapon_alert_RED"] = now_seconds
-
-            if green_list:
-                state["last_weapon_alert_GREEN"] = now_seconds
-
-            level = "CRITICAL" if red_list else "HIGH"
-
-            if red_list and green_list:
-                location_text = "RED and GREEN zones"
-            elif red_list:
-                location_text = "RED (restricted) zone"
-            else:
-                location_text = "GREEN (safe) area"
-
-            found = red_list + green_list
-
-            zone_names = ", ".join(
-                dict.fromkeys(item[8] for item in found)
-            )
-
-            lines = [
-                (
-                    f"- {item[4]} "
-                    f"({int(item[5] * 100)}% confidence) "
-                    f"in {item[6]} zone - {item[8]}, "
-                    f"held by person: "
-                    f"{'YES' if item[7] else 'not clear'}"
-                )
-                for item in found
-            ]
-
-            detail = (
-                f"{level} | "
-                + "; ".join(
-                    f"{item[4]} {int(item[5] * 100)}% "
-                    f"{item[6]} - {item[8]}"
-                    for item in found
-                )
-            )
-
-            stamp = now.strftime("%Y%m%d_%H%M%S")
-
-            image_path = os.path.join(
-                INCIDENTS_DIR,
-                f"weapon_{stamp}.jpg"
-            )
-
-            snapshot = frame.copy()
-
-            put_label(
-                snapshot,
-                f"WEAPON in: {zone_names}",
-                (10, height - 45),
-                (0, 0, 255)
-            )
-
-            cv2.imwrite(image_path, snapshot)
-
-            clip_path = reader.request_clip("weapon")
-
-            add_incident(
-                now.strftime("%Y-%m-%d %H:%M:%S"),
-                people,
-                int(max(
-                    [
-                        dwell_of(zone["id"])
-                        for zone in zones
-                    ],
-                    default=0
-                )),
-                image_path,
-                "weapon",
-                detail,
-                clip_path
-            )
-
-            body = (
-                f"DIGITAL EYE - WEAPON ALERT ({level})\n\n"
-                f"Possible weapon detected in {location_text}.\n"
-                + "\n".join(lines)
-                + "\n\n"
-                f"Person inside restricted zone: "
-                f"{'YES' if any_red else 'No'}\n"
-                f"People in view: {people}\n"
-                f"Camera: {CAMERA_NAME}\n"
-                f"Time: {now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                "Photo is attached.\n"
-                f"Video clip: {os.path.basename(clip_path)}\n\n"
-                "This is an automatic AI detection and it can be wrong. "
-                "Please check the photo before taking action."
-            )
-
-            threading.Thread(
-                target=send_email,
-                args=(
-                    f"{level}: Weapon detected - "
-                    f"{zone_names} - Digital Eye",
-                    body,
-                    image_path
-                ),
-                daemon=True
-            ).start()
-
-            state["live_alert_count"] = alerts_today()
-            st.session_state["alerts_metric"].metric(
-                "Alerts today",
-                state["live_alert_count"]
-            )
-
-            state["live_weapon_alert_count"] = alerts_today("weapon")
-            st.session_state["weapon_metric"].metric(
-                "Weapon alerts today",
-                state["live_weapon_alert_count"]
-            )
-
-            render_history(
-                st.session_state["history_placeholder"]
-            )
-
-
+# --------------------------------------------------
+# BUILD THE LIVE DASHBOARD
+# --------------------------------------------------
 def run_live_dashboard(
     reader,
     model,
-    weapon_model,
-    weapon_ids,
-    weapon_on,
-    weapon_conf,
-    weapon_every,
-    weapon_confirm,
-    weapon_cooldown,
     repeat_seconds,
     detection_size,
     show_outlines
 ):
     st.title("Digital Eye - Live Security Dashboard")
 
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1, col2, col3, col4, col5 = st.columns(5)
 
+    # Store placeholders so the live fragment can update them.
     st.session_state["people_metric"] = col1.empty()
     st.session_state["status_metric"] = col2.empty()
     st.session_state["zones_metric"] = col3.empty()
     st.session_state["alerts_metric"] = col4.empty()
-    st.session_state["weapon_metric"] = col5.empty()
-    st.session_state["camera_metric"] = col6.empty()
+    st.session_state["camera_metric"] = col5.empty()
 
     st.session_state["video_placeholder"] = st.empty()
 
@@ -921,48 +614,33 @@ def run_live_dashboard(
 
     st.session_state["recording_placeholder"] = st.sidebar.empty()
 
-    st.session_state["people_metric"].metric(
-        "People now",
-        "-"
-    )
-
-    st.session_state["status_metric"].metric(
-        "Status",
-        "Starting"
-    )
-
-    st.session_state["zones_metric"].metric(
-        "Zones occupied",
-        "-"
-    )
+    # Initial metric values.
+    st.session_state["people_metric"].metric("People now", "-")
+    st.session_state["status_metric"].metric("Status", "Starting")
+    st.session_state["zones_metric"].metric("Zones occupied", "-")
 
     st.session_state["alerts_metric"].metric(
         "Alerts today",
         alerts_today()
     )
 
-    st.session_state["weapon_metric"].metric(
-        "Weapon alerts today",
-        alerts_today("weapon")
+    st.session_state["camera_metric"].metric(
+        "Camera",
+        "Starting"
     )
 
     render_history(
         st.session_state["history_placeholder"]
     )
 
+    # Start camera if it is not already running.
     if not reader.running:
         reader.start()
 
+    # Begin periodic live processing.
     live_fragment(
         reader,
         model,
-        weapon_model,
-        weapon_ids,
-        weapon_on,
-        weapon_conf,
-        weapon_every,
-        weapon_confirm,
-        weapon_cooldown,
         repeat_seconds,
         detection_size,
         show_outlines

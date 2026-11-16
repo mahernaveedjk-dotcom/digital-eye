@@ -2,14 +2,11 @@ import threading
 
 import streamlit as st
 
-from settings import (
-    DETECTION_SIZES,
-    RECORDINGS_DIR
-)
+from settings import DETECTION_SIZES
 
 from database import init_db
 from camera import CameraReader
-from models import load_person_model, load_weapon_model
+from models import load_person_model
 from email_alerts import send_email
 
 from pages.login import show_login
@@ -22,7 +19,6 @@ from live_dashboard import run_live_dashboard
 # --------------------------------------------------
 # Application setup
 # --------------------------------------------------
-
 st.set_page_config(
     page_title="Digital Eye",
     page_icon="👁️",
@@ -32,6 +28,7 @@ st.set_page_config(
 init_db()
 
 
+# Cache one camera reader so Streamlit reruns do not create many cameras.
 @st.cache_resource
 def get_reader():
     return CameraReader()
@@ -43,15 +40,13 @@ reader = get_reader()
 # --------------------------------------------------
 # Login
 # --------------------------------------------------
-
 if not show_login():
     st.stop()
 
 
 # --------------------------------------------------
-# Sidebar
+# Sidebar controls
 # --------------------------------------------------
-
 st.sidebar.title("Controls")
 
 mode = st.sidebar.radio(
@@ -90,7 +85,6 @@ detection_size = DETECTION_SIZES[det_choice]
 # --------------------------------------------------
 # Recording controls
 # --------------------------------------------------
-
 st.sidebar.subheader("Recording")
 
 continuous_on = st.sidebar.toggle(
@@ -134,9 +128,7 @@ if st.sidebar.button(
         reader.start_recording()
 
 if reader.recording:
-    st.sidebar.error(
-        "● Recording is active"
-    )
+    st.sidebar.error("● Recording is active")
 
 if reader.rec_error:
     st.sidebar.warning(
@@ -146,9 +138,7 @@ if reader.rec_error:
 try:
     import imageio_ffmpeg
 
-    st.sidebar.caption(
-        "MP4 recording support is available."
-    )
+    st.sidebar.caption("MP4 recording support is available.")
 
 except ImportError:
     st.sidebar.caption(
@@ -157,52 +147,8 @@ except ImportError:
 
 
 # --------------------------------------------------
-# Weapon detection controls
-# --------------------------------------------------
-
-st.sidebar.subheader("Weapon detection")
-
-weapon_on = st.sidebar.toggle(
-    "Weapon detection ON",
-    value=True
-)
-
-weapon_conf = st.sidebar.slider(
-    "Weapon confidence",
-    0.30,
-    0.90,
-    0.50,
-    0.05
-)
-
-weapon_every = st.sidebar.slider(
-    "Check every N frames",
-    1,
-    10,
-    3
-)
-
-weapon_confirm = st.sidebar.slider(
-    "Checks in a row to confirm",
-    1,
-    5,
-    2
-)
-
-weapon_repeat_minutes = st.sidebar.slider(
-    "Repeat weapon alert every (minutes)",
-    1,
-    30,
-    2
-)
-
-weapon_cooldown = weapon_repeat_minutes * 60
-
-
-# --------------------------------------------------
 # Test email
 # --------------------------------------------------
-
 if st.sidebar.button("Send test email"):
     threading.Thread(
         target=send_email,
@@ -221,19 +167,15 @@ if st.sidebar.button("Send test email"):
 # --------------------------------------------------
 # Logout
 # --------------------------------------------------
-
 if st.sidebar.button("Log out"):
     reader.stop()
-
     st.session_state.auth = False
-
     st.rerun()
 
 
 # --------------------------------------------------
 # Camera management
 # --------------------------------------------------
-
 if not run_camera:
     reader.stop()
 
@@ -245,13 +187,11 @@ elif mode != "Live" and not reader.recording:
 
 
 # --------------------------------------------------
-# Pages
+# Other pages
 # --------------------------------------------------
-
 if mode == "Edit zones":
     edit_zones_page(reader)
     st.stop()
-
 
 if mode == "Recordings":
     recordings_page(reader)
@@ -261,56 +201,28 @@ if mode == "Recordings":
 # --------------------------------------------------
 # Camera OFF screen
 # --------------------------------------------------
-
 if not run_camera:
     st.title("Digital Eye - Live Security Dashboard")
-
     st.info(
         "The camera is off. Turn on 'Camera ON' in the sidebar."
     )
-
     st.metric("Camera", "OFF")
-
     st.stop()
 
 
 # --------------------------------------------------
-# Load AI models
+# Load the person model
 # --------------------------------------------------
-
-with st.spinner("Loading AI models..."):
+with st.spinner("Loading person detection model..."):
     person_model = load_person_model()
-
-    weapon_model = None
-    weapon_ids = []
-
-    if weapon_on:
-        try:
-            weapon_model, weapon_ids = load_weapon_model()
-
-        except Exception as error:
-            st.sidebar.error(
-                "Weapon model could not be loaded. "
-                "Check your internet connection or place "
-                "best.pt inside the models folder. "
-                f"Details: {error}"
-            )
 
 
 # --------------------------------------------------
 # Start live dashboard
 # --------------------------------------------------
-
 run_live_dashboard(
     reader=reader,
     model=person_model,
-    weapon_model=weapon_model,
-    weapon_ids=weapon_ids,
-    weapon_on=weapon_on,
-    weapon_conf=weapon_conf,
-    weapon_every=weapon_every,
-    weapon_confirm=weapon_confirm,
-    weapon_cooldown=weapon_cooldown,
     repeat_seconds=repeat_seconds,
     detection_size=detection_size,
     show_outlines=show_outlines
