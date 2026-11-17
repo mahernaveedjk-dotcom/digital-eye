@@ -274,7 +274,7 @@ class CameraReader:
                     "connecting" if first else "reconnecting"
                 )
 
-                capture = cv2.VideoCapture(self.index)
+                capture = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
 
                 if not capture.isOpened():
                     raise RuntimeError("Camera did not open")
