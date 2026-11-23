@@ -3,11 +3,20 @@ import smtplib
 import time
 from email.message import EmailMessage
 
-from config import EMAIL_FROM, EMAIL_APP_PASSWORD, EMAIL_TO
+from config import (
+    EMAIL_FROM, EMAIL_APP_PASSWORD, EMAIL_TO, email_is_configured
+)
 
 
 def send_email(subject, body, image_path=None):
-    """Send an email, retrying up to three times."""
+    """Send an email, retrying up to three times.
+
+    Returns False when SMTP settings are missing; the application remains usable.
+    """
+    if not email_is_configured():
+        print("Email is not configured. Set DIGITAL_EYE_EMAIL_FROM, "
+              "DIGITAL_EYE_EMAIL_APP_PASSWORD and DIGITAL_EYE_EMAIL_TO.")
+        return False
 
     for attempt in range(1, 4):
         try:

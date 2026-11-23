@@ -49,7 +49,8 @@ def add_incident(
     path,
     alert_type="zone",
     details="",
-    clip_path=""
+    clip_path="",
+    camera=None
 ):
     with closing(sqlite3.connect(DB_PATH)) as db:
         db.execute(
@@ -68,7 +69,7 @@ def add_incident(
             """,
             (
                 timestamp,
-                CAMERA_NAME,
+                camera or CAMERA_NAME,
                 people,
                 seconds,
                 path,

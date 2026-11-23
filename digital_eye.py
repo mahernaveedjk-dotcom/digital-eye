@@ -5,6 +5,7 @@ import streamlit as st
 
 from settings import DETECTION_SIZES
 from database import init_db
+from retention import cleanup_expired_media
 from camera import CameraReader
 from models import load_person_model
 from email_alerts import send_email
@@ -20,6 +21,7 @@ from multi_camera import (
     parse_camera_source,
     render_extra_cameras
 )
+from camera_config import CameraConfigStore
 
 
 # --------------------------------------------------
@@ -33,6 +35,7 @@ st.set_page_config(
 )
 
 init_db()
+cleanup_expired_media()
 
 
 # --------------------------------------------------
@@ -57,6 +60,7 @@ def get_multi_camera_manager():
 
 
 multi_manager = get_multi_camera_manager()
+camera_configs = CameraConfigStore()
 
 
 # --------------------------------------------------
@@ -82,6 +86,9 @@ run_camera = st.sidebar.toggle(
     "Camera ON",
     value=True
 )
+
+if run_camera:
+    multi_manager.restore_enabled()
 
 show_outlines = st.sidebar.toggle(
     "Show zone outlines when empty",
@@ -116,15 +123,21 @@ st.sidebar.subheader("Additional Cameras")
 with st.sidebar.expander("Manage Cameras 2–4"):
 
     for number in range(2, 5):
+        saved = camera_configs.get(number)
+        st.markdown(f"**{saved['name']} (Slot {number})**")
 
-        st.markdown(f"**Camera {number}**")
-
+        camera_name = st.text_input(
+            f"Camera {number} name",
+            value=saved["name"],
+            key=f"camera_name_{number}",
+            max_chars=64
+        )
         source_text = st.text_input(
             f"Camera {number} source",
-            value="",
+            value=saved["source"],
             key=f"camera_source_{number}",
-            placeholder="1 or RTSP URL",
-            help="Enter a USB camera index or an RTSP stream URL."
+            placeholder="1 or rtsp://...",
+            help="Enter a USB camera index or an RTSP stream URL. RTSP credentials are stored locally."
         )
 
         col1, col2 = st.columns(2)
@@ -145,14 +158,11 @@ with st.sidebar.expander("Manage Cameras 2–4"):
                 else:
                     source = parse_camera_source(source_text)
 
-                    multi_manager.connect(
-                        number,
-                        source
-                    )
-
-                    st.success(
-                        f"Camera {number} connection started."
-                    )
+                    try:
+                        multi_manager.connect(number, source, camera_name)
+                        st.success(f"{camera_name} connection started. Configuration saved.")
+                    except (ValueError, OSError) as error:
+                        st.error(f"Could not connect {camera_name}: {error}")
 
         with col2:
             if st.button(
@@ -161,18 +171,17 @@ with st.sidebar.expander("Manage Cameras 2–4"):
                 use_container_width=True
             ):
 
-                multi_manager.disconnect(number)
-
-                st.success(
-                    f"Camera {number} disconnected."
-                )
+                multi_manager.disconnect(number, clear_saved=True)
+                st.success(f"Camera {number} disconnected and automatic reconnection disabled.")
 
         camera = multi_manager.cameras.get(number)
 
         if camera:
-            st.caption(
-                f"Status: {camera.status.upper()}"
-            )
+            st.caption(f"Status: {camera.status.upper()}")
+            if camera.error:
+                st.caption(camera.error)
+        elif saved["enabled"]:
+            st.caption("Saved for automatic reconnection")
 
         st.divider()
 
@@ -295,7 +304,7 @@ if st.sidebar.button("Log out"):
 if not run_camera:
 
     reader.stop()
-    multi_manager.stop_all()
+    multi_manager.stop_all(preserve_configuration=True)
 
 elif reader.continuous:
 

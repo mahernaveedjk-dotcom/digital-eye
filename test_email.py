@@ -1,12 +1,15 @@
 import smtplib
 from email.message import EmailMessage
-from config import EMAIL_FROM, EMAIL_APP_PASSWORD, EMAIL_TO
+from config import EMAIL_FROM, EMAIL_APP_PASSWORD, EMAIL_TO, email_is_configured
 
 msg = EmailMessage()
 msg["Subject"] = "Digital Eye test"
 msg["From"] = EMAIL_FROM
 msg["To"] = EMAIL_TO
 msg.set_content("This is a test email from Digital Eye.")
+
+if not email_is_configured():
+    raise SystemExit("Configure DIGITAL_EYE_EMAIL_FROM, DIGITAL_EYE_EMAIL_APP_PASSWORD and DIGITAL_EYE_EMAIL_TO first.")
 
 with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as server:
     server.starttls()

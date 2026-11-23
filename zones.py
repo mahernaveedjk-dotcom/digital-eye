@@ -1,89 +1,63 @@
-import json
-import os
+"""Zone persistence and drawing helpers for Digital Eye.
+
+Camera 1 remains backward compatible with the existing zones.json file.
+Cameras 2-4 are stored in zones_camera_2.json, zones_camera_3.json,
+and zones_camera_4.json in the project directory.
+
+Existing calls such as load_zones() and save_zones(zones) continue to work
+and refer to Camera 1.
+"""
+
 import cv2
 
-from settings import (
-    ZONES_FILE,
-    RESTRICTED_COLOR,
-    WARNING_COLOR,
-    FONT
-)
+from settings import ZONES_FILE, RESTRICTED_COLOR, WARNING_COLOR, FONT
+from camera_zones import load_camera_zones, save_camera_zones
 
 
-def save_zones(zones):
-    with open(ZONES_FILE, "w", encoding="utf-8") as file:
-        json.dump(zones, file, indent=2)
+def load_zones(camera_id=1):
+    """Load zones for a camera. Defaults to Camera 1 for compatibility."""
+    return load_camera_zones(camera_id)
 
 
-def _is_old_default(zone):
-    return (
-        zone.get("name") == "Zone 1"
-        and zone.get("type", "Restricted") == "Restricted"
-        and abs(zone.get("x1", -1) - 0.5) < 1e-6
-        and abs(zone.get("y1", -1) - 0.0) < 1e-6
-        and abs(zone.get("x2", -1) - 1.0) < 1e-6
-        and abs(zone.get("y2", -1) - 1.0) < 1e-6
-        and zone.get("timer", 10) == 10
-    )
-
-
-def load_zones():
-    if not os.path.exists(ZONES_FILE):
-        return []
-
-    try:
-        with open(ZONES_FILE, encoding="utf-8") as file:
-            zones = json.load(file)
-    except (json.JSONDecodeError, OSError):
-        return []
-
-    if not isinstance(zones, list):
-        return []
-
-    kept_zones = [
-        zone for zone in zones
-        if not _is_old_default(zone)
-    ]
-
-    if len(kept_zones) != len(zones):
-        save_zones(kept_zones)
-
-    for zone in kept_zones:
-        zone.setdefault("enabled", True)
-        zone.setdefault("timer", 10)
-        zone.setdefault("type", "Restricted")
-
-    return kept_zones
+def save_zones(zones, camera_id=1):
+    """Save zones for a camera. Defaults to Camera 1 for compatibility."""
+    return save_camera_zones(camera_id, zones)
 
 
 def zone_color(zone):
-    if zone["type"] == "Restricted":
-        return RESTRICTED_COLOR
+    """Return the OpenCV BGR color for a zone."""
+    zone_type = str(zone.get("type", "Restricted")).strip().lower()
+    return WARNING_COLOR if zone_type == "warning" else RESTRICTED_COLOR
 
-    return WARNING_COLOR
 
+def draw_zone_box(frame, zone, active=False, thickness=2):
+    """Draw a normalized zone rectangle and its label onto a BGR frame."""
+    if frame is None or not isinstance(zone, dict):
+        return frame
 
-def draw_zone_box(img, zone, width, height, active=True):
-    x1 = int(width * zone["x1"])
-    y1 = int(height * zone["y1"])
-    x2 = int(width * zone["x2"])
-    y2 = int(height * zone["y2"])
+    height, width = frame.shape[:2]
+    try:
+        x1 = int(float(zone.get("x1", 0)) * width)
+        y1 = int(float(zone.get("y1", 0)) * height)
+        x2 = int(float(zone.get("x2", 0)) * width)
+        y2 = int(float(zone.get("y2", 0)) * height)
+    except (TypeError, ValueError):
+        return frame
 
+    color = zone_color(zone)
     if not zone.get("enabled", True):
-        color = (150, 150, 150)
+        color = (130, 130, 130)
+
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+    label = str(zone.get("name", "Zone"))
+    if not zone.get("enabled", True):
+        label += " (Disabled)"
     elif active:
-        color = zone_color(zone)
-    else:
-        color = (255, 255, 255)
+        label += " (ACTIVE)"
 
-    cv2.rectangle(img, (x1, y1), (x2, y2), color, 1)
+    text_y = max(18, y1 - 7)
+    cv2.putText(frame, label, (x1, text_y), FONT, 0.55, color, 2, cv2.LINE_AA)
+    return frame
 
-    cv2.putText(
-        img,
-        f"{zone['name']} - {zone['type']}",
-        (x1 + 5, y1 + 18),
-        FONT,
-        0.5,
-        color,
-        1
-    )
+
+__all__ = ["load_zones", "save_zones", "zone_color", "draw_zone_box"]

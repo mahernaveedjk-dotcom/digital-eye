@@ -1,7 +1,6 @@
 venv/
 __pycache__/
 *.pyc
-config.py
 .env
 *.db
 *.sqlite
@@ -11,3 +10,5 @@ incidents/
 *.pt
 *.onnx
 *.log
+# May contain private RTSP URLs and camera credentials
+camera_config.json

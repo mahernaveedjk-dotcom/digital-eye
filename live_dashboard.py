@@ -30,60 +30,64 @@ from detection import detect_people
 
 
 # Show previously saved alerts in the dashboard.
-def render_history(history_placeholder):
+def render_history():
     rows = recent_incidents()
 
-    with history_placeholder.container():
-        if not rows:
-            st.info("No alerts yet.")
-            return
+    if not rows:
+        st.info("No alerts yet.")
+        return
 
-        columns = st.columns(3)
+    columns = st.columns(3)
 
-        for index, (
-            timestamp,
-            seconds,
-            image_path,
-            alert_type,
-            details,
-            clip_path
-        ) in enumerate(rows):
+    for index, (
+        timestamp,
+        seconds,
+        image_path,
+        alert_type,
+        details,
+        clip_path
+    ) in enumerate(rows):
 
-            if alert_type == "warning":
-                caption = (
-                    f"{timestamp} | WARNING - "
-                    f"{details} | {seconds}s"
+        if alert_type == "warning":
+            caption = (
+                f"{timestamp} | WARNING - "
+                f"{details} | {seconds}s"
+            )
+
+        elif alert_type == "zone":
+            caption = (
+                f"{timestamp} | "
+                f"{details or 'Zone'} | {seconds}s in zone"
+            )
+
+        else:
+            caption = (
+                f"{timestamp} | Previous incident: "
+                f"{details or 'Saved incident'}"
+            )
+
+        with columns[index % 3]:
+            if image_path and os.path.exists(image_path):
+                st.image(
+                    image_path,
+                    caption=caption,
+                    width=300
                 )
-
-            elif alert_type == "zone":
-                caption = (
-                    f"{timestamp} | "
-                    f"{details or 'Zone'} | {seconds}s in zone"
-                )
-
             else:
-                caption = (
-                    f"{timestamp} | Previous incident: "
-                    f"{details or 'Saved incident'}"
-                )
+                st.write(caption + " (photo missing)")
 
-            with columns[index % 3]:
-                if image_path and os.path.exists(image_path):
-                    st.image(
-                        image_path,
-                        caption=caption,
-                        width=300
-                    )
+            if clip_path:
+                if os.path.exists(clip_path):
+                    with st.expander("Play video clip"):
+                        st.video(clip_path)
                 else:
-                    st.write(caption + " (photo missing)")
+                    st.caption("Video clip is being saved...")
 
-                if clip_path:
-                    if os.path.exists(clip_path):
-                        with st.expander("Play video clip"):
-                            st.video(clip_path)
-                    else:
-                        st.caption("Video clip is being saved...")
 
+# Refresh alert history independently from the live camera fragment.
+@st.fragment(run_every=2.0)
+def history_fragment():
+    render_history()
 
 # Calculate how long a person has occupied a particular zone.
 def get_zone_dwell(zone_state, zone_id, now_seconds):
@@ -176,11 +180,6 @@ def live_fragment(
     # Get the newest camera frame.
     frame_id, frame = reader.get_frame(state["live_last_id"])
     now_seconds = time.time()
-
-    # Refresh incident history every two seconds.
-    if now_seconds - state["live_last_history"] >= 2.0:
-        render_history(st.session_state["history_placeholder"])
-        state["live_last_history"] = now_seconds
 
     # Handle camera connection problems.
     if frame is None:
@@ -474,12 +473,8 @@ def live_fragment(
         delta_color="off"
     )
 
-    # Refresh history when a video clip finishes saving.
-    finished = reader.pop_finished_clips()
-
-    if finished:
-        render_history(st.session_state["history_placeholder"])
-        state["live_last_history"] = now_seconds
+    # Collect completed clips; the separate history fragment refreshes the list.
+    reader.pop_finished_clips()
 
     # Keep recording timer visible in the sidebar.
     if reader.recording:
@@ -581,9 +576,6 @@ def live_fragment(
                 state["live_alert_count"]
             )
 
-            render_history(
-                st.session_state["history_placeholder"]
-            )
 
 
 # --------------------------------------------------
@@ -610,7 +602,6 @@ def run_live_dashboard(
     st.session_state["video_placeholder"] = st.empty()
 
     st.subheader("Recent alerts")
-    st.session_state["history_placeholder"] = st.empty()
 
     st.session_state["recording_placeholder"] = st.sidebar.empty()
 
@@ -629,9 +620,7 @@ def run_live_dashboard(
         "Starting"
     )
 
-    render_history(
-        st.session_state["history_placeholder"]
-    )
+    history_fragment()
 
     # Start camera if it is not already running.
     if not reader.running:

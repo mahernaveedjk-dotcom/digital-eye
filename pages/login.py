@@ -5,6 +5,10 @@ from config import DASHBOARD_PASSWORD
 
 
 def show_login():
+    if not DASHBOARD_PASSWORD:
+        st.error("Dashboard password is not configured. Set DIGITAL_EYE_PASSWORD before starting Digital Eye.")
+        return False
+
     if st.session_state.get("auth", False):
         return True
 
